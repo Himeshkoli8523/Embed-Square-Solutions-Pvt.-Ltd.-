@@ -1,239 +1,188 @@
-# EmbedKit_Himesh - Ring Buffer
+# EmbedKit_Himesh Koli
 
-A circular buffer for `uint8_t` data, written in C99.
-Built around the classic UART pattern: ISR writes bytes in, main loop drains them out.
+**Author:** Himesh Koli
 
----
-
-## Table of Contents
-
-1. [Project Status](#project-status)
-2. [Background](#background)
-3. [Dependencies](#dependencies)
-4. [Build and Run](#build-and-run)
-5. [API Reference](#api-reference)
-6. [Design Decisions](#design-decisions)
-7. [Expected Output](#expected-output)
-8. [Platform Notes](#platform-notes)
-9. [Known Limitations](#known-limitations)
-10. [License](#license)
-
----
-
-## Project Status
-
-Works. Compiles clean with `gcc -Wall -std=c99` -- zero errors, zero warnings.
-Tested on Linux (gcc 11) and Windows (MinGW / WSL).
-No cross-compiler or embedded hardware needed to run the demo.
-
----
-
-## Background
-
-The problem this solves: a UART ISR fires every time a byte arrives and needs
-somewhere to put it. The main loop is busy doing other things and can't always
-read immediately. Without a buffer in between, bytes get dropped.
-
-```
-Producer (UART ISR)          Consumer (main loop)
-      |                              |
-      v                              v
-[ 0x41 | 0x42 | 0x43 | ... | 0x48 ]   <-- 8-slot circular array
-   ^tail                       ^head
-```
-
-Two indices move through the array:
-
-- head -- where the next write lands
-- tail -- where the next read comes from
-
-Both wrap back to 0 when they hit the end, which is why it's called circular.
-The buffer absorbs bursts from the ISR and lets the application drain at its
-own pace without losing anything.
-
----
-
-## Dependencies
-
-| Requirement | Detail |
-|-------------|--------|
-| C standard  | C99    |
-| Compiler    | gcc 9+ |
-| Headers     | `<stdio.h>` `<stdint.h>` `<string.h>` `<stdlib.h>` |
-
-No external libraries. No RTOS. No hardware.
-
----
-
-## Build and Run
+## Build Instructions
 
 ```bash
-# compile
 gcc -Wall -std=c99 ringbuf.c -o ringbuf
-
-# run
-./ringbuf          # Linux / macOS / WSL
-ringbuf.exe        # Windows (MinGW)
+./ringbuf
 ```
 
-On Windows if gcc is not on your PATH yet:
+## Module
 
-```powershell
-$env:PATH += ";C:\MinGW\bin"
-gcc -Wall -std=c99 ringbuf.c -o ringbuf
-.\ringbuf.exe
-```
+### ringbuf.c
+
+A circular (ring) buffer for uint8_t data with a fixed capacity of 8 bytes,
+demonstrating ISR-safe FIFO queue behaviour for embedded UART receive buffering.
 
 ---
 
-## API Reference
-
-All functions take a pointer to a `RingBuf`. Return codes: `RB_OK (0)`,
-`RB_FULL (-1)`, `RB_EMPTY (-2)`.
-
-### rb_init
+### Line-by-line explanation
 
 ```c
-void rb_init(RingBuf *rb);
+#include <stdio.h>
 ```
+Gives us printf() to print output to the terminal.
 
-Zeroes out head, tail, and count. Call this once before anything else.
+```c
+#include <stdint.h>
+```
+Gives us fixed-width types like uint8_t and int8_t so the code works correctly
+on any MCU, whether int is 8-bit, 16-bit, or 32-bit.
+
+```c
+#include <string.h>
+```
+Gives us memset(), used to zero out the buffer array on initialisation.
+
+```c
+#include <stdlib.h>
+```
+Included for completeness as a standard embedded C dependency.
+
+```c
+#define BUFFER_SIZE  8u
+```
+The capacity of the ring buffer -- 8 bytes. Must be a power of 2 for the
+bitwise wrap trick to work. The `u` suffix makes it an unsigned literal.
+
+```c
+#define BUFFER_MASK  (BUFFER_SIZE - 1u)
+```
+Equals 0x07 in binary: 00000111. Used to wrap the head and tail indices back
+to 0 without using the % (modulo) operator. ANDing any index with 0x07 keeps
+only the lower 3 bits, which is identical to index % 8 -- but takes 1 cycle
+instead of ~100 on MCUs without a hardware divider.
+
+```c
+#define RB_OK     0
+#define RB_FULL  -1
+#define RB_EMPTY -2
+```
+Return codes for rb_write() and rb_read(). Using named constants instead of
+raw numbers makes the caller code readable and avoids magic numbers.
+
+```c
+typedef struct {
+    uint8_t buf[BUFFER_SIZE];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+} RingBuf;
+```
+The ring buffer struct. `buf` is the actual storage array. `head` tracks where
+the next write goes. `tail` tracks where the next read comes from. `count`
+tracks how many bytes are currently stored -- this avoids the head==tail
+ambiguity between full and empty states.
+
+```c
+void rb_init(RingBuf *rb)
+{
+    rb->head = rb->tail = rb->count = 0;
+    memset(rb->buf, 0, sizeof(rb->buf));
+}
+```
+Resets the buffer to an empty state. Sets head, tail, and count all to zero,
+then zeroes out the storage array. Must be called once before any read or write.
+
+```c
+static uint8_t is_full(const RingBuf *rb)  { return rb->count == BUFFER_SIZE; }
+static uint8_t is_empty(const RingBuf *rb) { return rb->count == 0; }
+```
+Internal helpers that return 1 (true) or 0 (false). Marked static so they are
+invisible outside this file -- they are not part of the public API. The const
+keyword means these functions promise not to modify the buffer.
+
+```c
+uint8_t rb_count(const RingBuf *rb) { return rb->count; }
+```
+Public function that returns how many bytes are currently in the buffer.
+
+```c
+int8_t rb_write(RingBuf *rb, uint8_t byte)
+{
+    if (is_full(rb))
+        return RB_FULL;
+
+    rb->buf[rb->head] = byte;
+    rb->head = (rb->head + 1) & BUFFER_MASK;
+    rb->count++;
+    return RB_OK;
+}
+```
+Writes one byte into the buffer. First checks if full -- if so, returns RB_FULL
+immediately and does nothing, so existing data is never overwritten. Otherwise,
+stores the byte at the current head index, advances head using the AND-mask wrap
+(so it circles back to 0 after index 7), increments count, and returns RB_OK.
+
+```c
+int8_t rb_read(RingBuf *rb, uint8_t *b)
+{
+    if (is_empty(rb))
+        return RB_EMPTY;
+
+    *b = rb->buf[rb->tail];
+    rb->tail = (rb->tail + 1) & BUFFER_MASK;
+    rb->count--;
+    return RB_OK;
+}
+```
+Reads one byte out of the buffer into the variable pointed to by b. First checks
+if empty -- if so, returns RB_EMPTY and leaves *b untouched, so garbage is never
+returned. Otherwise, copies the byte at the current tail index into *b, advances
+tail with the AND-mask wrap, decrements count, and returns RB_OK.
 
 ```c
 RingBuf rb;
+uint8_t b;
+int8_t  ret;
+uint8_t i;
 rb_init(&rb);
 ```
-
-### rb_write
-
-```c
-int8_t rb_write(RingBuf *rb, uint8_t byte);
-```
-
-Puts one byte into the buffer. Returns `RB_FULL` and does nothing if there's
-no room -- it will never silently clobber data that hasn't been read yet.
+Inside main(): declares the buffer and working variables, then initialises the
+buffer to a clean empty state before anything else touches it.
 
 ```c
-if (rb_write(&rb, 0x41) == RB_FULL) {
-    /* handle it -- set an error flag, blink an LED, whatever makes sense */
-}
+uint8_t fill[] = { 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+for (i = 0; i < 8; i++) { ... }
 ```
-
-### rb_read
+Writes 8 bytes (ASCII 'A' through 'H') one at a time. After all 8 writes the
+buffer is full and count equals 8.
 
 ```c
-int8_t rb_read(RingBuf *rb, uint8_t *b);
+ret = rb_write(&rb, 0x99);
 ```
-
-Pulls one byte out into `*b`. Returns `RB_EMPTY` if there's nothing to read --
-it will never hand back stale or uninitialised data.
+Tries to write a 9th byte into a full buffer. rb_write() returns RB_FULL and
+the byte is discarded -- existing data is untouched.
 
 ```c
-uint8_t byte;
-if (rb_read(&rb, &byte) == RB_OK) {
-    process(byte);
-}
+for (i = 0; i < 3; i++) { rb_read(&rb, &b); ... }
 ```
-
-### rb_count
+Reads 3 bytes out (0x41, 0x42, 0x43 in order). Count drops from 8 to 5 and
+those 3 slots are now free for reuse.
 
 ```c
-uint8_t rb_count(const RingBuf *rb);
+uint8_t more[] = { 0x49, 0x4A, 0x4B };
+for (i = 0; i < 3; i++) { rb_write(&rb, more[i]); ... }
 ```
-
-Returns how many bytes are currently sitting in the buffer (0 to BUFFER_SIZE).
+Writes 3 new bytes into the 3 freed slots. Head has wrapped back to array
+index 0, so these bytes physically sit at indices 0, 1, 2 -- but they still
+come out in the correct FIFO order because tail is tracking independently.
+This is the wrap-around behaviour that makes it circular.
 
 ```c
-printf("bytes waiting: %u\n", rb_count(&rb));
+while (!is_empty(&rb)) { rb_read(&rb, &b); ... }
 ```
-
-### is_full / is_empty
+Drains all 8 remaining bytes one at a time until the buffer is empty.
 
 ```c
-static uint8_t is_full(const RingBuf *rb);
-static uint8_t is_empty(const RingBuf *rb);
+ret = rb_read(&rb, &b);
 ```
-
-Internal helpers, not exposed outside `ringbuf.c`. Return 1 or 0.
-
----
-
-## Design Decisions
-
-### & instead of %
+Attempts one final read on the now-empty buffer. rb_read() returns RB_EMPTY
+and prints the failure message, confirming the guard works correctly.
 
 ```c
-/* what you'd write first -- works, but % is slow */
-head = (head + 1) % BUFFER_SIZE;
-
-/* what's actually in the code -- one AND instruction */
-head = (head + 1) & BUFFER_MASK;   /* BUFFER_MASK = 0x07 */
+return 0;
 ```
-
-Most small MCUs (Cortex-M0, AVR) have no hardware divider. The compiler has to
-fake division using a software routine that takes roughly 20-100 clock cycles.
-A bitwise AND is always a single instruction. In a UART ISR that has to finish
-in microseconds, that difference matters.
-
-The catch: it only works when BUFFER_SIZE is a power of 2. When size is 2^N,
-the mask (2^N - 1) is exactly N ones in binary, so ANDing with it is the same
-as taking the remainder. Try it with a non-power-of-2 size and you get the
-wrong index.
-
-### Separate count field
-
-The obvious alternative is to infer full/empty by comparing head and tail.
-The problem: both conditions look the same -- head == tail -- so you can't tell
-them apart without adding an extra flag anyway. A dedicated count field sidesteps
-the whole issue and keeps is_full() and is_empty() as readable one-liners.
-
-### static helpers
-
-is_full() and is_empty() are marked static so they stay invisible outside this
-translation unit. They're just there to make rb_write() and rb_read() easier to
-read -- not meant to be called directly.
-
-### Fixed-width integer types
-
-Everything uses uint8_t and int8_t from stdint.h instead of plain int or char.
-On a 16-bit target, a plain int costs twice the register space it needs to.
-Using the explicitly-sized types means the code means what it says on any arch.
-
----
-
-## Expected Output
-
-```
-[WRITE] 0x41 -> OK (count=1)
-[WRITE] 0x42 -> OK (count=2)
-[WRITE] 0x43 -> OK (count=3)
-[WRITE] 0x44 -> OK (count=4)
-[WRITE] 0x45 -> OK (count=5)
-[WRITE] 0x46 -> OK (count=6)
-[WRITE] 0x47 -> OK (count=7)
-[WRITE] 0x48 -> OK (count=8) FULL
-[WRITE] 0x99 -> FAIL (buffer full)
-[READ]  -> 0x41 (count=7)
-[READ]  -> 0x42 (count=6)
-[READ]  -> 0x43 (count=5)
-[WRITE] 0x49 -> OK (count=6)
-[WRITE] 0x4A -> OK (count=7)
-[WRITE] 0x4B -> OK (count=8) FULL
-[READ]  -> 0x44 (count=7)
-[READ]  -> 0x45 (count=6)
-[READ]  -> 0x46 (count=5)
-[READ]  -> 0x47 (count=4)
-[READ]  -> 0x48 (count=3)
-[READ]  -> 0x49 (count=2)
-[READ]  -> 0x4A (count=1)
-[READ]  -> 0x4B (count=0)
-[READ] (empty) -> FAIL (buffer empty)
-```
-
-The interesting part is step 4. After reading three bytes, the three freed
-slots are reused for 0x49, 0x4A, 0x4B -- head has wrapped back to array
-index 0. They still come out in the right order because tail is tracking
-independently. That's the whole point of the circular design.
-
----
-
+Returns 0 to the OS, indicating the program exited successfully.
