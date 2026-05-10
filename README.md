@@ -1,4 +1,4 @@
-# EmbedKit_[YourName] - Ring Buffer
+# EmbedKit_Himesh - Ring Buffer
 
 A circular buffer for `uint8_t` data, written in C99.
 Built around the classic UART pattern: ISR writes bytes in, main loop drains them out.
@@ -264,9 +264,3 @@ Only handles uint8_t. If you need 16-bit or 32-bit elements you'd need a
 separate implementation or a macro-based generic version.
 
 ---
-
-## License
-
-MIT. Use it, modify it, ship it. Just keep the author line in there.
-
-Copyright (c) 2024 [Your Full Name]
